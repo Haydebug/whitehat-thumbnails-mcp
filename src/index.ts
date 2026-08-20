@@ -21,6 +21,7 @@ import {
   getChannelMessages,
   sendChannelMessage,
   createTicket,
+  postTicketPanel,
   TICKET_TYPES,
   type Capabilities,
   getCapabilities,
@@ -355,7 +356,7 @@ server.registerTool(
   {
     title: 'File a ticket',
     description:
-      "Open a ticket on a game — the same thing the /ticket command does in Discord. It is posted as an embed with Approve and Deny buttons in whichever channel that game is configured for, and shows up in get_notification_history alongside everything else. Use type 'payment' with amountUsd to ask for money; the ticket counts as paid once someone clicks Paid.",
+      "Open a ticket on a game — the same thing the /ticket command does in Discord. Each ticket gets a channel of its own, named 🟢-0001 and filed under a category named after the game, so the sidebar reads as what is open on it; closing the ticket renames that channel to closed-0001 and drops the dot. The ticket itself is an embed with Approve, Deny and Close buttons. Use type 'payment' with amountUsd to ask for money; it counts as paid once someone clicks Paid.",
     inputSchema: {
       game: z.string().describe('Game name or universe id.'),
       type: z
@@ -402,11 +403,12 @@ server.registerTool(
         role,
       })
 
-      const lines = [`Ticket ${result.ticketId} — "${title}" on ${project.gameName}.`]
+      const number = String(result.ticketNumber).padStart(4, '0')
+      const lines = [`Ticket ${number} — "${title}" on ${project.gameName}. Id ${result.ticketId}.`]
       lines.push(
         result.posted
-          ? `Posted in ${result.channelName ? `#${result.channelName}` : 'the game channel'} with answer buttons.`
-          : `Not posted: ${result.channelProblem ?? 'no channel configured for this game.'}`
+          ? `Opened ${result.channelName ? `#${result.channelName}` : 'a channel'} for it, with answer and close buttons.`
+          : `Not posted: ${result.channelProblem ?? 'no channel available for this game.'}`
       )
       if (result.dmTotal > 0) {
         lines.push(`Also DM'd to ${result.dmSent} of ${result.dmTotal} in "${role}".`)
@@ -415,6 +417,34 @@ server.registerTool(
         lines.push(`Invoice for $${amountUsd}. It counts as paid once someone clicks Paid.`)
       }
       return ok(lines.join('\n'))
+    } catch (err) {
+      return fail(err)
+    }
+  }
+)
+
+server.registerTool(
+  'post_ticket_panel',
+  {
+    title: 'Put up the Add ticket button',
+    description:
+      "Post a game's standing \"Add ticket\" button in its channel. Anyone who clicks it gets a short form, and filing it opens a numbered channel for that ticket under the game's category. create_channel and link_channel already do this when they point a game at a channel, so this is for putting the button back after it has scrolled out of sight, or moving it somewhere else. Posting it again takes the previous one down rather than leaving two.",
+    inputSchema: {
+      game: z.string().describe('Game name or universe id.'),
+      channelId: z
+        .string()
+        .optional()
+        .describe("Where to put it. Defaults to the channel the game is already linked to."),
+    },
+  },
+  async ({ game, channelId }) => {
+    try {
+      const project = await resolveProject(game)
+      const result = await postTicketPanel(project.universeId, channelId)
+      return ok(
+        `The Add ticket button for ${project.gameName} is up in channel ${result.channelId}.` +
+          (result.replacedOld ? ' The previous one was taken down.' : '')
+      )
     } catch (err) {
       return fail(err)
     }
@@ -487,6 +517,19 @@ server.registerTool(
         lines.push(
           `Linked to ${project.gameName}: tickets post there, and the site's View channel button points at it.`
         )
+
+        // The button is the whole point of the channel, so it goes up as part
+        // of setting the game up rather than as a second thing to remember.
+        // A failure here is reported and nothing else: the channel exists and
+        // is linked, and post_ticket_panel can finish the job on its own.
+        try {
+          await postTicketPanel(project.universeId, channel.id)
+          lines.push('Put the Add ticket button in it.')
+        } catch (err) {
+          lines.push(
+            `Could not put the Add ticket button up: ${err instanceof Error ? err.message : String(err)}`
+          )
+        }
       }
 
       return ok(lines.join('\n'))
@@ -516,10 +559,29 @@ server.registerTool(
       const result = await linkChannel(project.universeId, channelId ?? null)
 
       if (!result.ticketChannelId) return ok(`${project.gameName} is no longer linked to a channel.`)
-      return ok(
+
+      const lines = [
         `${project.gameName} -> #${result.ticketChannelName ?? result.ticketChannelId}. ` +
-          `Tickets post there${result.discordChannelUrl ? `, and the View channel button points at ${result.discordChannelUrl}` : ''}.`
-      )
+          `Tickets post there${result.discordChannelUrl ? `, and the View channel button points at ${result.discordChannelUrl}` : ''}.`,
+      ]
+
+      // Linking a game to a channel is the moment its Add ticket button belongs
+      // in that channel, so it goes up here too rather than being left as a
+      // step someone has to know about.
+      try {
+        const panel = await postTicketPanel(project.universeId, result.ticketChannelId)
+        lines.push(
+          panel.replacedOld
+            ? 'Moved the Add ticket button there and took the old one down.'
+            : 'Put the Add ticket button in it.'
+        )
+      } catch (err) {
+        lines.push(
+          `Could not put the Add ticket button up: ${err instanceof Error ? err.message : String(err)}`
+        )
+      }
+
+      return ok(lines.join('\n'))
     } catch (err) {
       return fail(err)
     }

@@ -444,14 +444,36 @@ export async function sendChannelMessage(
 
 // ── Tickets ─────────────────────────────────────────────────────────────────
 
+/**
+ * Put the standing "Add ticket" button in a game's channel.
+ *
+ * Posting it again moves it to the bottom of the channel and removes the old
+ * one, which is what you want after a month of conversation has pushed it out
+ * of sight.
+ */
+export function postTicketPanel(
+  universeId: string,
+  channelId?: string | null
+): Promise<{ channelId: string; messageId: string; replacedOld: boolean }> {
+  return request(`/api/projects/${universeId}/ticket-panel`, {
+    method: 'POST',
+    body: JSON.stringify(channelId ? { channelId } : {}),
+  })
+}
+
+
 export const TICKET_TYPES = ['concept_review', 'final_review', 'payment', 'status'] as const
 export type TicketType = (typeof TICKET_TYPES)[number]
 
 export interface TicketResult {
   ticketId: string
-  /** Whether it reached the game's Discord channel. */
+  /** Position in the game's sequence — 7, shown everywhere as 0007. */
+  ticketNumber: number
+  /** Whether it reached a Discord channel at all. */
   posted: boolean
   channelName: string | null
+  /** The channel opened for this ticket, when it got one of its own. */
+  ticketChannelId: string | null
   channelProblem: string | null
   dmSent: number
   dmTotal: number
