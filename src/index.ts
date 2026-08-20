@@ -435,14 +435,23 @@ server.registerTool(
         .string()
         .optional()
         .describe("Where to put it. Defaults to the channel the game is already linked to."),
+      role: z
+        .string()
+        .optional()
+        .describe(
+          'Who to ping in each new ticket channel, by name, e.g. "Thumbnail Team". Guessed from the role list the first time and remembered after that.'
+        ),
     },
   },
-  async ({ game, channelId }) => {
+  async ({ game, channelId, role }) => {
     try {
       const project = await resolveProject(game)
-      const result = await postTicketPanel(project.universeId, channelId)
+      const result = await postTicketPanel(project.universeId, channelId, role)
       return ok(
         `The Add ticket button for ${project.gameName} is up in channel ${result.channelId}.` +
+          (result.pingRoleName
+            ? ` New tickets ping ${result.pingRoleName} in their own channel.`
+            : ' Nothing gets pinged on a new ticket — pass a role to change that.') +
           (result.replacedOld ? ' The previous one was taken down.' : '')
       )
     } catch (err) {

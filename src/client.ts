@@ -453,11 +453,20 @@ export async function sendChannelMessage(
  */
 export function postTicketPanel(
   universeId: string,
-  channelId?: string | null
-): Promise<{ channelId: string; messageId: string; replacedOld: boolean }> {
+  channelId?: string | null,
+  role?: string | null
+): Promise<{
+  channelId: string
+  messageId: string
+  replacedOld: boolean
+  pingRoleName: string | null
+}> {
   return request(`/api/projects/${universeId}/ticket-panel`, {
     method: 'POST',
-    body: JSON.stringify(channelId ? { channelId } : {}),
+    body: JSON.stringify({
+      ...(channelId ? { channelId } : {}),
+      ...(role ? { role } : {}),
+    }),
   })
 }
 
