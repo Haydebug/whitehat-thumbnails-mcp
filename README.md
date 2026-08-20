@@ -232,8 +232,12 @@ For the bot to see a channel it needs **View Channel**, **Read Message History**
 **Send Messages** and **Attach Files** there. Invite it with:
 
 ```
-https://discord.com/api/oauth2/authorize?client_id=<APP_ID>&scope=bot&permissions=117760
+https://discord.com/oauth2/authorize?client_id=<APP_ID>&scope=bot%20applications.commands&permissions=117760
 ```
+
+Both scopes matter. `bot` gets it into the server; `applications.commands` is what
+makes `/ticket` visible there. A bot invited without the second one works fine for
+DMs and channel posts while its slash commands silently never appear.
 
 ---
 
