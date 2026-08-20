@@ -213,6 +213,12 @@ server.registerTool(
         .string()
         .optional()
         .describe('Where to send the money, e.g. paypal.me/name. Shown as a pay button.'),
+      ticket: z
+        .string()
+        .optional()
+        .describe(
+          'Relay a copy into this ticket, by number (0007, or just 7) or by id. The DMs still go out exactly the same; the ticket additionally gets the note and every answer to it, so it reads as the whole story.'
+        ),
     },
   },
   async ({
@@ -226,6 +232,7 @@ server.registerTool(
     declineLabel,
     paymentAmount,
     paypalLink,
+    ticket,
   }) => {
     try {
       const project = await resolveProject(game)
@@ -242,6 +249,28 @@ server.registerTool(
       }
       const allImages = [...uploaded, ...(imageUrls ?? [])].slice(0, 4)
 
+      // A number is what someone reading the channel list has; an id is what
+      // create_ticket handed back. Resolved here so the API only ever sees an id.
+      let parentTicketId: string | undefined
+      if (ticket) {
+        const digits = ticket.replace(/[^0-9]/g, '')
+        const { tickets } = await listTickets(project.universeId)
+        const found =
+          tickets.find((t) => t.id === ticket) ??
+          (digits ? tickets.find((t) => t.ticketNumber === Number(digits)) : undefined)
+        if (!found) {
+          const open = tickets
+            .filter((t) => t.ticketNumber != null && !t.closed)
+            .map((t) => String(t.ticketNumber).padStart(4, '0'))
+          return fail(
+            new Error(
+              `No ticket "${ticket}" on ${project.gameName}. Open right now: ${open.join(', ') || 'none'}.`
+            )
+          )
+        }
+        parentTicketId = found.id
+      }
+
       const result = await notifyTeam(project.universeId, {
         message,
         roleId: chosen.id,
@@ -253,11 +282,19 @@ server.registerTool(
         declineLabel,
         paymentAmount,
         paypalLink,
+        parentTicketId,
       })
 
       const lines = [
         `Sent to ${result.sent} of ${result.deliveries.length} in "${chosen.name}" about ${project.gameName}.`,
       ]
+      if (ticket) {
+        lines.push(
+          result.loggedToTicket
+            ? `Copied into ticket ${ticket}, and answers will land there too.`
+            : `Could not write it into ticket ${ticket} — the DMs went out regardless.`
+        )
+      }
       const problems = result.deliveries.filter((d) => d.status !== 'sent')
       if (problems.length) {
         lines.push('', 'Did not arrive:')

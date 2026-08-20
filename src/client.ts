@@ -196,6 +196,13 @@ export interface NotificationRecord {
   title: string | null
   channelId: string | null
   channelMessageId: string | null
+  /** Position in the game's sequence — 7, shown everywhere as 0007. */
+  ticketNumber: number | null
+  closed: boolean
+  closedAt: string | null
+  closedByLabel: string | null
+  /** Set on a note that was relayed into a ticket rather than sent alone. */
+  parentTicketId: string | null
 }
 
 export interface NotifyContext {
@@ -250,8 +257,16 @@ export function notifyTeam(
     declineLabel?: string
     paymentAmount?: number
     paypalLink?: string
+    /** Relay a copy into this ticket's channel, and its answers with it. */
+    parentTicketId?: string
   }
-): Promise<{ sent: number; deliveries: Delivery[]; entry: NotificationRecord }> {
+): Promise<{
+  sent: number
+  deliveries: Delivery[]
+  entry: NotificationRecord
+  /** Null when no ticket was named; false when the copy could not be posted. */
+  loggedToTicket: boolean | null
+}> {
   return request(`/api/projects/${universeId}/notify`, {
     method: 'POST',
     body: JSON.stringify(payload),
