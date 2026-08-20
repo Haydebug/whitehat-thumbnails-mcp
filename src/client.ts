@@ -330,6 +330,48 @@ export async function listChannels(): Promise<StudioChannel[]> {
   return channels
 }
 
+export interface CreatedChannel extends StudioChannel {
+  /** False when a channel of this name was already there and was reused. */
+  created: boolean
+}
+
+/**
+ * Make a channel in the studio server.
+ *
+ * The bot needs Manage Channels for this, which is not part of a plain "let it
+ * talk" invite — the site answers a missing permission with a sentence
+ * saying so rather than a status code, and that is what surfaces to the caller.
+ */
+export function createChannel(payload: {
+  name: string
+  categoryName?: string
+  topic?: string
+}): Promise<{ guildId: string; channel: CreatedChannel; url: string }> {
+  return request('/api/discord/channels', {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  })
+}
+
+/**
+ * Point a game at a channel: where its tickets get posted, and where the "View
+ * channel" button on its notifications goes. The same pairing /ticket config
+ * makes in Discord. Pass null to unlink.
+ */
+export function linkChannel(
+  universeId: string,
+  channelId: string | null
+): Promise<{
+  ticketChannelId: string | null
+  ticketChannelName?: string | null
+  discordChannelUrl?: string | null
+}> {
+  return request(`/api/projects/${universeId}/settings`, {
+    method: 'PATCH',
+    body: JSON.stringify({ ticketChannelId: channelId }),
+  })
+}
+
 export interface ChannelMessage {
   id: string
   authorId: string

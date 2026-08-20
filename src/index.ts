@@ -13,6 +13,8 @@ import {
   uploadNotificationImage,
   uploadThumbnail,
   listChannels,
+  createChannel,
+  linkChannel,
   getChannelMessages,
   sendChannelMessage,
   createTicket,
@@ -406,6 +408,86 @@ server.registerTool(
         channels
           .map((c) => `#${c.name} — id ${c.id}${c.category ? ` (in ${c.category})` : ''}`)
           .join('\n')
+      )
+    } catch (err) {
+      return fail(err)
+    }
+  }
+)
+
+server.registerTool(
+  'create_channel',
+  {
+    title: 'Create a studio channel',
+    description:
+      "Make a text channel in the studio Discord server - one per game or per artist. Pass a game to point it at that game at the same time, which is the whole of setting a new game up: the channel exists, its tickets go there, and the site's View channel button follows. Running it twice with the same name reuses the channel already there rather than making a second one. The bot needs Manage Channels; without it this comes back saying so, and the fix is a fresh invite link, not another call.",
+    inputSchema: {
+      name: z
+        .string()
+        .describe('What to call it. Tidied into the shape Discord accepts, so "Build a Mini City!" becomes build-a-mini-city.'),
+      category: z
+        .string()
+        .optional()
+        .describe('Category to file it under, by name, e.g. "bugs stuff". Top level when left out.'),
+      topic: z.string().optional().describe('Channel topic, shown under the name.'),
+      game: z
+        .string()
+        .optional()
+        .describe('Game name or universe id. Given, the new channel is linked to it as well.'),
+    },
+  },
+  async ({ name, category, topic, game }) => {
+    try {
+      const { channel, url } = await createChannel({ name, categoryName: category, topic })
+
+      const lines = [
+        channel.created
+          ? `Created #${channel.name} - id ${channel.id}${channel.category ? ` in ${channel.category}` : ''}.`
+          : `#${channel.name} already existed - id ${channel.id}${channel.category ? ` in ${channel.category}` : ''}. Reused it.`,
+        url,
+      ]
+
+      // Linking is a second call against the project rather than part of
+      // creation, so a game that cannot be resolved still leaves the channel
+      // standing and says what is left to do.
+      if (game) {
+        const project = await resolveProject(game)
+        await linkChannel(project.universeId, channel.id)
+        lines.push(
+          `Linked to ${project.gameName}: tickets post there, and the site's View channel button points at it.`
+        )
+      }
+
+      return ok(lines.join('\n'))
+    } catch (err) {
+      return fail(err)
+    }
+  }
+)
+
+server.registerTool(
+  'link_channel',
+  {
+    title: 'Link a game to a channel',
+    description:
+      'Point a game at a channel that already exists: where its tickets get posted, and where the View channel button on its notifications goes. The same pairing /ticket config makes in Discord, without needing to be in the server. Take the id from list_artist_channels. Pass no channel to unlink.',
+    inputSchema: {
+      game: z.string().describe('Game name or universe id.'),
+      channelId: z
+        .string()
+        .optional()
+        .describe('Channel id from list_artist_channels. Leave out to unlink the game.'),
+    },
+  },
+  async ({ game, channelId }) => {
+    try {
+      const project = await resolveProject(game)
+      const result = await linkChannel(project.universeId, channelId ?? null)
+
+      if (!result.ticketChannelId) return ok(`${project.gameName} is no longer linked to a channel.`)
+      return ok(
+        `${project.gameName} -> #${result.ticketChannelName ?? result.ticketChannelId}. ` +
+          `Tickets post there${result.discordChannelUrl ? `, and the View channel button points at ${result.discordChannelUrl}` : ''}.`
       )
     } catch (err) {
       return fail(err)
