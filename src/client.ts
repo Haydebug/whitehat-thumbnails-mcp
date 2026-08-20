@@ -494,6 +494,10 @@ export function setTicketStage(
   stageLabel: string
   fromLabel: string | null
   changed: boolean
+  /** Stages jumped clean over by this move, by label. */
+  skipped: string[]
+  /** True when the move went back up the pipeline rather than down it. */
+  movedBack: boolean
   posted: boolean
   problem: string | null
 }> {

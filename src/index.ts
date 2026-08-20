@@ -485,7 +485,7 @@ server.registerTool(
   {
     title: 'Move a ticket along the pipeline',
     description:
-      "Set which of the twelve production stages a ticket is on, and redraw the pinned status card in its channel. The card is rewritten in place, so calling this repeatedly never fills the channel with status messages. Opening a ticket puts it on 'ordered' and clicking Approve moves it to 'confirmed' automatically; every stage after that is set here or with /ticket status. The two review gates are stored apart — 'concept_review' waits on the idea, 'art_review' waits on the finished art — even though both read as \"Waiting for review\" to a person.",
+      "Set which of the twelve production stages a ticket is on, and redraw the pinned status card in its channel. Every move posts its own card in the ticket channel rather than editing the last one, so the channel is a readable record of how the work went; only the newest stays pinned. Jumping several stages at once is allowed and the card names the ones that were skipped. Opening a ticket puts it on 'ordered' and clicking Approve moves it to 'confirmed' automatically; every stage after that is set here or with /ticket status. The two review gates are stored apart — 'concept_review' waits on the idea, 'art_review' waits on the finished art — even though both read as \"Waiting for review\" to a person.",
     inputSchema: {
       game: z.string().describe('Game name or universe id.'),
       ticket: z.string().describe('Ticket number, e.g. 0002, or the ticket id.'),
@@ -519,7 +519,11 @@ server.registerTool(
           ? `Ticket ${number} moved from ${r.fromLabel} to ${r.stageLabel}.`
           : `Ticket ${number} is now on ${r.stageLabel}.`,
       ]
-      lines.push(r.posted ? 'Status card updated in the channel.' : (r.problem ?? 'Could not update the status card.'))
+      if (r.skipped?.length) {
+        lines.push(`Skipped ${r.skipped.length}: ${r.skipped.join(', ')}.`)
+      }
+      if (r.movedBack) lines.push('That is a step back up the pipeline.')
+      lines.push(r.posted ? 'Card posted in the channel.' : (r.problem ?? 'Could not post the card.'))
       return ok(lines.join(' '))
     } catch (err) {
       return fail(err)
