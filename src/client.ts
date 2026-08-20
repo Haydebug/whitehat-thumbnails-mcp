@@ -172,7 +172,30 @@ export interface NotificationRecord {
   actionsEnabled: boolean
   approveLabel: string
   declineLabel: string
-  responses: { responderLabel: string; choice: string; createdAt: string }[]
+  /**
+   * One row per person who answered. The Discord id is what a caller should
+   * gate on — a label is a display name and changes the day someone renames
+   * themselves, which would silently break "did both of them approve".
+   */
+  responses: {
+    discordUserId: string
+    responderLabel: string
+    choice: string
+    createdAt: string
+  }[]
+  /** Set only on tickets that asked for money. Decimal arrives as a string. */
+  paymentAmount: string | number | null
+  paypalLink: string | null
+  paid: boolean
+  paidAt: string | null
+  paidByLabel: string | null
+  /** Where it was filed from: 'site', 'discord' or 'mcp'. */
+  source: string
+  /** Set when it was filed as a ticket rather than sent as a note. */
+  ticketType: string | null
+  title: string | null
+  channelId: string | null
+  channelMessageId: string | null
 }
 
 export interface NotifyContext {
@@ -225,6 +248,8 @@ export function notifyTeam(
     actionsEnabled?: boolean
     approveLabel?: string
     declineLabel?: string
+    paymentAmount?: number
+    paypalLink?: string
   }
 ): Promise<{ sent: number; deliveries: Delivery[]; entry: NotificationRecord }> {
   return request(`/api/projects/${universeId}/notify`, {
@@ -282,5 +307,135 @@ export async function uploadThumbnail(universeId: string, filePath: string): Pro
       imageBase64: bytes.toString('base64'),
       mimeType: mimeFor(filePath),
     }),
+  })
+}
+
+// ── Studio channels ─────────────────────────────────────────────────────────
+
+/**
+ * Artist conversations happen in per-person channels in the studio server.
+ * These are guild-wide rather than per-project: a channel belongs to a person,
+ * and the same artist works across several games.
+ */
+
+export interface StudioChannel {
+  id: string
+  name: string
+  category: string | null
+  position: number
+}
+
+export async function listChannels(): Promise<StudioChannel[]> {
+  const { channels } = await request<{ channels: StudioChannel[] }>('/api/discord/channels')
+  return channels
+}
+
+export interface ChannelMessage {
+  id: string
+  authorId: string
+  authorLabel: string
+  isBot: boolean
+  timestamp: string
+  text: string
+  attachments: { url: string; filename: string; contentType: string | null; size: number }[]
+}
+
+export function getChannelMessages(
+  channelId: string,
+  opts: { since?: string; limit?: number } = {}
+): Promise<{ messages: ChannelMessage[]; lastMessageId: string | null }> {
+  const params = new URLSearchParams()
+  if (opts.since) params.set('since', opts.since)
+  if (opts.limit) params.set('limit', String(opts.limit))
+  const query = params.toString()
+  return request(`/api/discord/channels/${channelId}/messages${query ? `?${query}` : ''}`)
+}
+
+/**
+ * Post as the bot.
+ *
+ * Files ride along in the same request rather than being hosted first, so an
+ * art brief and its reference image arrive together.
+ */
+export interface EmbedInput {
+  title?: string
+  description?: string
+  url?: string
+  color?: string | number
+  author?: string
+  footer?: string
+  fields?: { name: string; value: string; inline?: boolean }[]
+  imageUrl?: string
+  thumbnailUrl?: string
+  buttons?: { label: string; url: string }[]
+}
+
+export async function sendChannelMessage(
+  channelId: string,
+  text: string,
+  imagePaths: string[] = [],
+  embed?: EmbedInput
+): Promise<{ messageId: string }> {
+  if (imagePaths.length === 0) {
+    return request(`/api/discord/channels/${channelId}/messages`, {
+      method: 'POST',
+      body: JSON.stringify({ text, embed }),
+    })
+  }
+
+  const form = new FormData()
+  form.append('text', text)
+  // A form field holds a string, so the embed travels as JSON and is parsed on
+  // the other side.
+  if (embed) form.append('embed', JSON.stringify(embed))
+  for (const path of imagePaths.slice(0, 4)) {
+    const bytes = await readFile(path)
+    form.append(
+      'files',
+      new Blob([new Uint8Array(bytes)], { type: mimeFor(path) }),
+      basename(path)
+    )
+  }
+
+  return request(`/api/discord/channels/${channelId}/messages`, { method: 'POST', body: form })
+}
+
+// ── Tickets ─────────────────────────────────────────────────────────────────
+
+export const TICKET_TYPES = ['concept_review', 'final_review', 'payment', 'status'] as const
+export type TicketType = (typeof TICKET_TYPES)[number]
+
+export interface TicketResult {
+  ticketId: string
+  /** Whether it reached the game's Discord channel. */
+  posted: boolean
+  channelName: string | null
+  channelProblem: string | null
+  dmSent: number
+  dmTotal: number
+}
+
+/**
+ * File a ticket.
+ *
+ * The same call the /ticket command in Discord makes, so a ticket opened by an
+ * automation and one opened by a person are the same record with the same
+ * buttons on it.
+ */
+export function createTicket(
+  universeId: string,
+  payload: {
+    type: TicketType
+    title: string
+    description: string
+    imageUrls?: string[]
+    amountUsd?: number
+    paypalLink?: string
+    role?: string
+  }
+): Promise<TicketResult> {
+  return request(`/api/projects/${universeId}/tickets`, {
+    method: 'POST',
+    body: JSON.stringify(payload),
   })
 }

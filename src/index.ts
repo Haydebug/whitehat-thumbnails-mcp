@@ -12,9 +12,14 @@ import {
   notifyTeam,
   uploadNotificationImage,
   uploadThumbnail,
+  listChannels,
+  getChannelMessages,
+  sendChannelMessage,
+  createTicket,
+  TICKET_TYPES,
 } from './client.js'
 
-const server = new McpServer({ name: 'whitehat-thumbnails', version: '1.0.0' })
+const server = new McpServer({ name: 'whitehat-thumbnails', version: '1.2.0' })
 
 /** Tool results are text; errors are returned as text too so the model can react. */
 function ok(text: string) {
@@ -146,7 +151,7 @@ server.registerTool(
   {
     title: 'Notify a Discord role',
     description:
-      'DM everyone holding a Discord role about a game. Can attach images and can ask for an answer with two buttons whose labels you choose (for example Approve/Disapprove, or Paid/Cancel). When buttons are used, whoever answers has their decision sent to the whole role.',
+      'DM everyone holding a Discord role about a game. Can attach images and can ask for an answer with two buttons whose labels you choose (for example Approve/Disapprove, or Paid/Cancel). When buttons are used, whoever answers has their decision sent to the whole role. Pass paymentAmount to make it an invoice for commissioned work: the DM shows the amount and a pay button, the buttons default to Paid/Cancel, and clicking Paid marks the ticket paid.',
     inputSchema: {
       game: z.string().describe('Game name or universe id.'),
       role: z.string().describe('Discord role name or id to notify.'),
@@ -165,9 +170,28 @@ server.registerTool(
         .describe('Add two answer buttons. Defaults to false.'),
       approveLabel: z.string().optional().describe('Label for the positive button. Defaults to "Approve".'),
       declineLabel: z.string().optional().describe('Label for the negative button. Defaults to "No".'),
+      paymentAmount: z
+        .number()
+        .optional()
+        .describe('What this commission costs, in dollars. Makes it a payment ticket.'),
+      paypalLink: z
+        .string()
+        .optional()
+        .describe('Where to send the money, e.g. paypal.me/name. Shown as a pay button.'),
     },
   },
-  async ({ game, role, message, imagePaths, imageUrls, askForAnswer, approveLabel, declineLabel }) => {
+  async ({
+    game,
+    role,
+    message,
+    imagePaths,
+    imageUrls,
+    askForAnswer,
+    approveLabel,
+    declineLabel,
+    paymentAmount,
+    paypalLink,
+  }) => {
     try {
       const project = await resolveProject(game)
       const ctx = await getNotifyContext(project.universeId)
@@ -187,9 +211,13 @@ server.registerTool(
         message,
         roleId: chosen.id,
         imageUrls: allImages,
-        actionsEnabled: askForAnswer ?? false,
+        // An invoice gets buttons whether or not they were asked for; there is
+        // no way to mark it paid without them.
+        actionsEnabled: askForAnswer ?? paymentAmount !== undefined,
         approveLabel,
         declineLabel,
+        paymentAmount,
+        paypalLink,
       })
 
       const lines = [
@@ -200,8 +228,16 @@ server.registerTool(
         lines.push('', 'Did not arrive:')
         for (const p of problems) lines.push(`  ${p.label} — ${p.detail ?? p.status}`)
       }
-      if (askForAnswer) {
-        lines.push('', `Buttons: "${approveLabel ?? 'Approve'}" / "${declineLabel ?? 'No'}". Answers are broadcast to the role.`)
+      const isInvoice = paymentAmount !== undefined
+      if (askForAnswer ?? isInvoice) {
+        const yes = approveLabel ?? (isInvoice ? 'Paid' : 'Approve')
+        const no = declineLabel ?? (isInvoice ? 'Cancel' : 'No')
+        lines.push('', `Buttons: "${yes}" / "${no}". Answers are broadcast to the role.`)
+      }
+      if (isInvoice) {
+        lines.push(
+          `Invoice for $${paymentAmount}${paypalLink ? ` · ${paypalLink}` : ''} — ticket ${result.entry.id}. It counts as paid once someone clicks "${approveLabel ?? 'Paid'}".`
+        )
       }
       return ok(lines.join('\n'))
     } catch (err) {
@@ -214,7 +250,8 @@ server.registerTool(
   'get_notification_history',
   {
     title: 'Past notifications',
-    description: 'What has already been sent to the team about a game, with timestamps and any answers.',
+    description:
+      'What has already been sent to the team about a game, with timestamps and any answers. Each answer names who gave it, what they chose, their Discord id, and when — so a caller can gate on a specific pair of people having both approved. Payment tickets also report whether they are paid.',
     inputSchema: {
       game: z.string().describe('Game name or universe id.'),
       limit: z.number().optional().describe('How many to return. Defaults to 10.'),
@@ -230,21 +267,249 @@ server.registerTool(
       return ok(
         items
           .map((h) => {
+            // One line per answer rather than a comma list: a caller gating on
+            // "both of them approved" needs each person's id and the moment they
+            // decided, not a summary that reads well.
             const answers = h.responses.length
               ? h.responses
-                  .map((r) => `${r.responderLabel}=${r.choice === 'approve' ? h.approveLabel : h.declineLabel}`)
-                  .join(', ')
+                  .map(
+                    (r) =>
+                      `    ${r.responderLabel} (${r.discordUserId}) = ` +
+                      `${r.choice === 'approve' ? h.approveLabel : h.declineLabel} ` +
+                      `at ${new Date(r.createdAt).toISOString()}`
+                  )
+                  .join('\n')
               : h.actionsEnabled
-                ? 'no answers yet'
+                ? '    no answers yet'
                 : null
+
+            const payment =
+              h.paymentAmount !== null && h.paymentAmount !== undefined
+                ? `\n  payment: $${h.paymentAmount}` +
+                  `${h.paypalLink ? ` · ${h.paypalLink}` : ''} · ` +
+                  (h.paid
+                    ? `PAID${h.paidByLabel ? ` by ${h.paidByLabel}` : ''}` +
+                      `${h.paidAt ? ` at ${new Date(h.paidAt).toISOString()}` : ''}`
+                    : 'UNPAID')
+                : ''
+
+            // A ticket names itself; a plain note is only ever "who told whom".
+            const heading = h.ticketType
+              ? `[${h.ticketType}] ${h.title ?? '(untitled)'} — ${h.senderLabel} via ${h.source}` +
+                `${h.channelMessageId ? ` in channel ${h.channelId}` : ''}`
+              : `${h.senderLabel} → "${h.roleName}" (${h.sentCount}/${h.totalCount} delivered)`
+
             return (
-              `${new Date(h.createdAt).toISOString()} — ${h.senderLabel} → "${h.roleName}" ` +
-              `(${h.sentCount}/${h.totalCount} delivered)\n  ${h.message.replace(/\n/g, '\n  ')}` +
+              `${new Date(h.createdAt).toISOString()} — ${heading} · ticket ${h.id}` +
+              `\n  ${h.message.replace(/\n/g, '\n  ')}` +
               `${h.imageUrls.length ? `\n  ${h.imageUrls.length} image(s)` : ''}` +
-              `${answers ? `\n  answers: ${answers}` : ''}`
+              payment +
+              `${answers ? `\n  answers:\n${answers}` : ''}`
             )
           })
           .join('\n\n')
+      )
+    } catch (err) {
+      return fail(err)
+    }
+  }
+)
+
+// ── Tickets ─────────────────────────────────────────────────────────────────
+
+server.registerTool(
+  'create_ticket',
+  {
+    title: 'File a ticket',
+    description:
+      "Open a ticket on a game — the same thing the /ticket command does in Discord. It is posted as an embed with Approve and Deny buttons in whichever channel that game is configured for, and shows up in get_notification_history alongside everything else. Use type 'payment' with amountUsd to ask for money; the ticket counts as paid once someone clicks Paid.",
+    inputSchema: {
+      game: z.string().describe('Game name or universe id.'),
+      type: z
+        .enum(TICKET_TYPES)
+        .describe('concept_review, final_review, payment, or status.'),
+      title: z.string().describe('Short summary, shown as the embed heading.'),
+      description: z.string().describe('What needs doing, or what happened.'),
+      imagePaths: z
+        .array(z.string())
+        .optional()
+        .describe('Local image files to attach. Uploaded automatically. Up to 4.'),
+      imageUrls: z
+        .array(z.string())
+        .optional()
+        .describe('Already-public image URLs to attach. Up to 4 in total with imagePaths.'),
+      amountUsd: z
+        .number()
+        .optional()
+        .describe('What it costs, in dollars. Required for a payment ticket.'),
+      paypalLink: z.string().optional().describe('Where to send the money, e.g. paypal.me/name.'),
+      role: z
+        .string()
+        .optional()
+        .describe('Also DM this Discord role, for people who prefer DMs to channels.'),
+    },
+  },
+  async ({ game, type, title, description, imagePaths, imageUrls, amountUsd, paypalLink, role }) => {
+    try {
+      const project = await resolveProject(game)
+
+      const uploaded: string[] = []
+      for (const path of imagePaths ?? []) {
+        uploaded.push(await uploadNotificationImage(project.universeId, path))
+      }
+      const allImages = [...uploaded, ...(imageUrls ?? [])].slice(0, 4)
+
+      const result = await createTicket(project.universeId, {
+        type,
+        title,
+        description,
+        imageUrls: allImages,
+        amountUsd,
+        paypalLink,
+        role,
+      })
+
+      const lines = [`Ticket ${result.ticketId} — "${title}" on ${project.gameName}.`]
+      lines.push(
+        result.posted
+          ? `Posted in ${result.channelName ? `#${result.channelName}` : 'the game channel'} with answer buttons.`
+          : `Not posted: ${result.channelProblem ?? 'no channel configured for this game.'}`
+      )
+      if (result.dmTotal > 0) {
+        lines.push(`Also DM'd to ${result.dmSent} of ${result.dmTotal} in "${role}".`)
+      }
+      if (amountUsd !== undefined) {
+        lines.push(`Invoice for $${amountUsd}. It counts as paid once someone clicks Paid.`)
+      }
+      return ok(lines.join('\n'))
+    } catch (err) {
+      return fail(err)
+    }
+  }
+)
+
+// ── Studio channels ─────────────────────────────────────────────────────────
+
+server.registerTool(
+  'list_artist_channels',
+  {
+    title: 'List studio channels',
+    description:
+      'The text channels the bot can see in the studio Discord server, with their ids — one per artist. Use this to turn an artist name into a channel id. A channel missing from this list is one the bot has not been given access to.',
+    inputSchema: {},
+  },
+  async () => {
+    try {
+      const channels = await listChannels()
+      if (channels.length === 0) return ok('The bot cannot see any text channels in the server.')
+      return ok(
+        channels
+          .map((c) => `#${c.name} — id ${c.id}${c.category ? ` (in ${c.category})` : ''}`)
+          .join('\n')
+      )
+    } catch (err) {
+      return fail(err)
+    }
+  }
+)
+
+server.registerTool(
+  'get_channel_messages',
+  {
+    title: 'Read a channel',
+    description:
+      'Messages in a studio channel, oldest first, with author, time, text and attachment URLs. Pass the lastMessageId from the previous read as `since` to get only what is new — that is how a poll avoids re-reading. Attachment links are signed and expire within about a day, so download art when you see it rather than saving the URL.',
+    inputSchema: {
+      channelId: z.string().describe('Channel id from list_artist_channels.'),
+      since: z
+        .string()
+        .optional()
+        .describe('Only messages after this one. A message id, or a time like 2026-08-19T10:00:00Z.'),
+      limit: z.number().optional().describe('How many at most. Defaults to 50.'),
+    },
+  },
+  async ({ channelId, since, limit }) => {
+    try {
+      const { messages, lastMessageId } = await getChannelMessages(channelId, { since, limit })
+      if (messages.length === 0) return ok('Nothing new in that channel.')
+
+      const body = messages
+        .map((m) => {
+          const files = m.attachments
+            .map((a) => `\n    ${a.filename} (${Math.round(a.size / 1024)}kb) ${a.url}`)
+            .join('')
+          return (
+            `${m.timestamp} — ${m.authorLabel}${m.isBot ? ' [bot]' : ''} (${m.authorId})` +
+            `${m.text ? `\n  ${m.text.replace(/\n/g, '\n  ')}` : ''}` +
+            `${files ? `\n  attachments:${files}` : ''}`
+          )
+        })
+        .join('\n\n')
+
+      return ok(`${body}\n\nlastMessageId: ${lastMessageId} — pass this as "since" next time.`)
+    } catch (err) {
+      return fail(err)
+    }
+  }
+)
+
+server.registerTool(
+  'send_channel_message',
+  {
+    title: 'Post in a channel',
+    description:
+      'Say something in a studio channel as the bot, as plain text or as an embed — the card with a coloured bar, a title, fields and link buttons. Images can be attached either way. Meant for messages that were already agreed on — briefs, thank-yous, status notes — not for improvising a conversation with an artist.',
+    inputSchema: {
+      channelId: z.string().describe('Channel id from list_artist_channels.'),
+      text: z
+        .string()
+        .optional()
+        .describe('What to post. Optional when an embed carries the message instead.'),
+      imagePaths: z
+        .array(z.string())
+        .optional()
+        .describe('Local image files to attach. Up to 4.'),
+      embed: z
+        .object({
+          title: z.string().optional().describe('Heading, shown in the accent colour.'),
+          description: z.string().optional().describe('The body. Markdown works here.'),
+          url: z.string().optional().describe('Makes the title a link.'),
+          color: z
+            .union([z.string(), z.number()])
+            .optional()
+            .describe('The left bar, as "#facc15" or a number. Defaults to the app yellow.'),
+          author: z.string().optional().describe('Small line above the title.'),
+          footer: z.string().optional().describe('Small line underneath.'),
+          fields: z
+            .array(
+              z.object({
+                name: z.string(),
+                value: z.string(),
+                inline: z.boolean().optional().describe('Sit side by side, up to three per row.'),
+              })
+            )
+            .optional()
+            .describe('Labelled rows, for numbers and short facts. Up to 25.'),
+          imageUrl: z.string().optional().describe('Large image below the text. Must be a public URL.'),
+          thumbnailUrl: z.string().optional().describe('Small image in the top-right corner.'),
+          buttons: z
+            .array(z.object({ label: z.string(), url: z.string() }))
+            .optional()
+            .describe('Link buttons underneath, up to 5. They open a URL; they cannot ask a question — use notify_team for that.'),
+        })
+        .optional()
+        .describe('Send as an embed card rather than plain text.'),
+    },
+  },
+  async ({ channelId, text, imagePaths, embed }) => {
+    try {
+      if (!text && !embed && !(imagePaths ?? []).length) {
+        return fail(new Error('Give it something to post: text, an embed, or images.'))
+      }
+      const { messageId } = await sendChannelMessage(channelId, text ?? '', imagePaths ?? [], embed)
+      const count = (imagePaths ?? []).slice(0, 4).length
+      return ok(
+        `Posted in the channel${embed ? ' as an embed' : ''}${count ? ` with ${count} attachment(s)` : ''}. Message ${messageId}.`
       )
     } catch (err) {
       return fail(err)

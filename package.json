@@ -1,6 +1,6 @@
 {
   "name": "whitehat-thumbnails-mcp",
-  "version": "1.0.0",
+  "version": "1.2.0",
   "description": "MCP server for White Hat Thumbnails — read Roblox thumbnail performance, upload thumbnails, and notify your Discord team.",
   "type": "module",
   "bin": { "whitehat-thumbnails-mcp": "dist/index.js" },
