@@ -23,6 +23,8 @@ import {
   createTicket,
   postTicketPanel,
   setTicketClosed,
+  setTicketStage,
+  getTicketStage,
   TICKET_TYPES,
   type Capabilities,
   getCapabilities,
@@ -453,6 +455,113 @@ server.registerTool(
       }
       if (amountUsd !== undefined) {
         lines.push(`Invoice for $${amountUsd}. It counts as paid once someone clicks Paid.`)
+      }
+      return ok(lines.join('\n'))
+    } catch (err) {
+      return fail(err)
+    }
+  }
+)
+
+// ── Production stages ───────────────────────────────────────────────────────
+
+const STAGE_KEYS = [
+  'ordered',
+  'confirmed',
+  'ideating',
+  'conceptualizing',
+  'concept_review',
+  'finding_artist',
+  'cooking_art',
+  'art_review',
+  'revising',
+  'delivered',
+  'data_reviewed',
+  'notes_taken',
+] as const
+
+server.registerTool(
+  'set_ticket_stage',
+  {
+    title: 'Move a ticket along the pipeline',
+    description:
+      "Set which of the twelve production stages a ticket is on, and redraw the pinned status card in its channel. The card is rewritten in place, so calling this repeatedly never fills the channel with status messages. Opening a ticket puts it on 'ordered' and clicking Approve moves it to 'confirmed' automatically; every stage after that is set here or with /ticket status. The two review gates are stored apart — 'concept_review' waits on the idea, 'art_review' waits on the finished art — even though both read as \"Waiting for review\" to a person.",
+    inputSchema: {
+      game: z.string().describe('Game name or universe id.'),
+      ticket: z.string().describe('Ticket number, e.g. 0002, or the ticket id.'),
+      stage: z
+        .enum(STAGE_KEYS)
+        .describe(
+          'Where it is now. In order: ordered, confirmed, ideating, conceptualizing, concept_review, finding_artist, cooking_art, art_review, revising, delivered, data_reviewed, notes_taken. Note revising goes back to the artist rather than forward.'
+        ),
+      note: z
+        .string()
+        .optional()
+        .describe('One line shown under the stage, e.g. "Second pass, wider crop".'),
+      eta: z
+        .string()
+        .optional()
+        .describe(
+          'When it should be done: 24h, 3d, or a date. Renders as a live countdown in each viewer’s own timezone.'
+        ),
+    },
+  },
+  async ({ game, ticket, stage, note, eta }) => {
+    try {
+      const project = await resolveProject(game)
+      const r = await setTicketStage(project.universeId, ticket, { stage, note, eta })
+      const number = r.ticketNumber != null ? String(r.ticketNumber).padStart(4, '0') : ticket
+
+      if (!r.changed) return ok(`Ticket ${number} is already on ${r.stageLabel}.`)
+
+      const lines = [
+        r.fromLabel
+          ? `Ticket ${number} moved from ${r.fromLabel} to ${r.stageLabel}.`
+          : `Ticket ${number} is now on ${r.stageLabel}.`,
+      ]
+      lines.push(r.posted ? 'Status card updated in the channel.' : (r.problem ?? 'Could not update the status card.'))
+      return ok(lines.join(' '))
+    } catch (err) {
+      return fail(err)
+    }
+  }
+)
+
+server.registerTool(
+  'get_ticket_stage',
+  {
+    title: 'Read a ticket’s stage',
+    description:
+      'Where a ticket sits in the twelve-stage pipeline, what comes next, any estimate on it, and every stage it has been through with who moved it and when. Use this to answer "how is that going" without reading the channel.',
+    inputSchema: {
+      game: z.string().describe('Game name or universe id.'),
+      ticket: z.string().describe('Ticket number, e.g. 0002, or the ticket id.'),
+    },
+  },
+  async ({ game, ticket }) => {
+    try {
+      const project = await resolveProject(game)
+      const r = await getTicketStage(project.universeId, ticket)
+      const number = r.ticketNumber != null ? String(r.ticketNumber).padStart(4, '0') : ticket
+
+      if (!r.stage) {
+        return ok(
+          `Ticket ${number} has no stage yet — it was opened before stages existed. Set one with set_ticket_stage.`
+        )
+      }
+
+      const lines = [
+        `${number}${r.title ? ` — ${r.title}` : ''}${r.closed ? ' (closed)' : ''}`,
+        `${r.stageLabel}  ${r.bar}  ${r.position} of ${r.total} · ${r.phase}`,
+      ]
+      if (r.note) lines.push(`note: ${r.note}`)
+      if (r.eta) lines.push(`estimate: ${r.eta}`)
+      lines.push(r.next ? `next: ${r.next}` : 'end of the pipeline')
+      if (r.history.length) {
+        lines.push('', 'history:')
+        for (const h of r.history) {
+          lines.push(`  ${h.at} — ${h.from ? `${h.from} -> ` : ''}${h.stage} (${h.by})`)
+        }
       }
       return ok(lines.join('\n'))
     } catch (err) {

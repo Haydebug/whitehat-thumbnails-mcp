@@ -459,6 +459,50 @@ export async function sendChannelMessage(
 
 // ── Tickets ─────────────────────────────────────────────────────────────────
 
+export interface StageView {
+  ticketId: string
+  ticketNumber: number | null
+  title: string | null
+  closed: boolean
+  stage: string | null
+  stageLabel: string | null
+  phase: string | null
+  position: number
+  total: number
+  bar: string
+  note: string | null
+  eta: string | null
+  next: string | null
+  history: { stage: string; from: string | null; by: string; at: string }[]
+  stages: { position: number; key: string; label: string; phase: string }[]
+}
+
+/** Where a ticket sits in the twelve-stage pipeline, and how it got there. */
+export function getTicketStage(universeId: string, ticket: string): Promise<StageView> {
+  return request(`/api/projects/${universeId}/tickets/${encodeURIComponent(ticket)}/stage`)
+}
+
+/** Move a ticket to a stage and redraw its status embed. */
+export function setTicketStage(
+  universeId: string,
+  ticket: string,
+  payload: { stage: string; note?: string; eta?: string }
+): Promise<{
+  ticketId: string
+  ticketNumber: number | null
+  stage: string
+  stageLabel: string
+  fromLabel: string | null
+  changed: boolean
+  posted: boolean
+  problem: string | null
+}> {
+  return request(`/api/projects/${universeId}/tickets/${encodeURIComponent(ticket)}/stage`, {
+    method: 'PATCH',
+    body: JSON.stringify(payload),
+  })
+}
+
 /**
  * Close a ticket, or open it back up.
  *
