@@ -445,6 +445,31 @@ export async function sendChannelMessage(
 // ── Tickets ─────────────────────────────────────────────────────────────────
 
 /**
+ * Close a ticket, or open it back up.
+ *
+ * Closing renames its channel to closed-0007 and greys the embed. Takes the
+ * ticket's number or its id.
+ */
+export function setTicketClosed(
+  universeId: string,
+  ticket: string,
+  closed: boolean,
+  reason?: string
+): Promise<{
+  ticketId: string
+  ticketNumber: number | null
+  closed: boolean
+  channelName: string | null
+  renameProblem: string | null
+  changed: boolean
+}> {
+  return request(`/api/projects/${universeId}/tickets/${encodeURIComponent(ticket)}`, {
+    method: 'PATCH',
+    body: JSON.stringify({ closed, ...(reason ? { reason } : {}) }),
+  })
+}
+
+/**
  * Put the standing "Add ticket" button in a game's channel.
  *
  * Posting it again moves it to the bottom of the channel and removes the old

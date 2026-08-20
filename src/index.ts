@@ -22,6 +22,7 @@ import {
   sendChannelMessage,
   createTicket,
   postTicketPanel,
+  setTicketClosed,
   TICKET_TYPES,
   type Capabilities,
   getCapabilities,
@@ -417,6 +418,46 @@ server.registerTool(
         lines.push(`Invoice for $${amountUsd}. It counts as paid once someone clicks Paid.`)
       }
       return ok(lines.join('\n'))
+    } catch (err) {
+      return fail(err)
+    }
+  }
+)
+
+server.registerTool(
+  'close_ticket',
+  {
+    title: 'Close or reopen a ticket',
+    description:
+      "Close a ticket once it is done, or open a closed one back up. Closing renames its channel from 🟢-0007 to closed-0007 and greys the embed, so the sidebar stops showing it as live work. The same thing the Close button on the ticket and /close-ticket in Discord do. Name the ticket by its number (0007, or just 7) or by the id create_ticket handed back.",
+    inputSchema: {
+      game: z.string().describe('Game name or universe id.'),
+      ticket: z.string().describe('Ticket number, e.g. 0007, or the ticket id.'),
+      reopen: z
+        .boolean()
+        .optional()
+        .describe('Open it back up instead of closing it.'),
+      reason: z
+        .string()
+        .optional()
+        .describe('A closing note, posted in the ticket channel for the record.'),
+    },
+  },
+  async ({ game, ticket, reopen, reason }) => {
+    try {
+      const project = await resolveProject(game)
+      const closing = reopen !== true
+      const r = await setTicketClosed(project.universeId, ticket, closing, reason)
+
+      const number = r.ticketNumber != null ? String(r.ticketNumber).padStart(4, '0') : ticket
+      if (!r.changed) return ok(`Ticket ${number} was already ${closing ? 'closed' : 'open'}.`)
+
+      const lines = [
+        closing ? `Closed ticket ${number} on ${project.gameName}.` : `Reopened ticket ${number} on ${project.gameName}.`,
+      ]
+      if (r.channelName) lines.push(`Its channel is #${r.channelName} now.`)
+      if (r.renameProblem) lines.push(r.renameProblem)
+      return ok(lines.join(' '))
     } catch (err) {
       return fail(err)
     }
