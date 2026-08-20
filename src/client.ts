@@ -481,3 +481,495 @@ export function createTicket(
     body: JSON.stringify(payload),
   })
 }
+
+// ── Binary responses ────────────────────────────────────────────────────────
+
+/**
+ * Same call as request(), for routes that answer with a file rather than JSON.
+ *
+ * A refusal is still JSON, so the error path parses the body the same way and
+ * the caller sees the site's sentence instead of a byte count.
+ */
+async function requestBinary(path: string, init: RequestInit = {}): Promise<Buffer> {
+  const res = await fetch(`${baseUrl()}${path}`, {
+    ...init,
+    headers: {
+      Authorization: `Bearer ${apiKey()}`,
+      ...(init.body instanceof FormData ? {} : { 'Content-Type': 'application/json' }),
+      ...(init.headers ?? {}),
+    },
+    signal: AbortSignal.timeout(120_000),
+  })
+
+  if (!res.ok) {
+    const text = await res.text()
+    let detail = text.slice(0, 400)
+    try {
+      const parsed = JSON.parse(text)
+      if (parsed?.error) detail = parsed.error
+    } catch { /* not JSON */ }
+    throw new WhtError(detail)
+  }
+
+  return Buffer.from(await res.arrayBuffer())
+}
+
+// ── Permissions ─────────────────────────────────────────────────────────────
+
+/**
+ * What a caller can actually do to a game, gathered rather than guessed.
+ *
+ * Nothing here is a single flag on the site — authority is spread across a
+ * Roblox cookie (uploads, deletes, swaps), an Open Cloud key (analytics), a
+ * personalization config (whether the live set can change at all) and a Discord
+ * bot (tickets and notifications). Each is probed separately and each failure
+ * is kept as the sentence the site gave, because "no" and "no, because the key
+ * is missing" lead to different next moves.
+ *
+ * Every section is caught on its own, so one dead source degrades the report
+ * rather than replacing it with an error.
+ */
+
+export interface SettingsState {
+  hasKey: boolean
+  encrypted: boolean
+  encryptionConfigured: boolean
+  hint: string | null
+  usingDefault: boolean
+  hasProjectCookie: boolean
+  account: { name: string | null; canEdit: boolean } | null
+  discordChannelUrl: string | null
+}
+
+export interface AutoSwapConfig {
+  autoSwapEnabled: boolean
+  dropCount: number
+  swapFrequencyMinutes: number
+  qptrThreshold: number
+  instantDropMinImpressions: number
+  nextSwapAt: string | null
+  lastSwapAt: string | null
+  autoDisabledAt: string | null
+  autoDisabledReason: string | null
+}
+
+export interface CronStatus {
+  intervalMinutes: number
+  lastFiredAt: string | null
+  nextFireAt: string
+  secondsUntilFire: number
+}
+
+export interface TicketChannel {
+  ticketChannelId: string | null
+  ticketChannelName: string | null
+}
+
+export interface Capabilities {
+  project: Project
+  settings: SettingsState | null
+  settingsProblem: string | null
+  thumbnails: ThumbnailReport | null
+  thumbnailsProblem: string | null
+  discord: NotifyContext | null
+  discordProblem: string | null
+  autoSwap: AutoSwapConfig | null
+  autoSwapProblem: string | null
+  cron: CronStatus | null
+  channel: TicketChannel | null
+  channelProblem: string | null
+}
+
+function problem(err: unknown): string {
+  return err instanceof Error ? err.message : String(err)
+}
+
+/** Run a probe, keeping its failure as text rather than letting it throw. */
+async function probe<T>(run: () => Promise<T>): Promise<[T, null] | [null, string]> {
+  try {
+    return [await run(), null]
+  } catch (err) {
+    return [null, problem(err)]
+  }
+}
+
+export function getSettings(universeId: string): Promise<SettingsState> {
+  return request<SettingsState>(`/api/projects/${universeId}/settings`)
+}
+
+export function getAutoSwap(universeId: string): Promise<AutoSwapConfig> {
+  return request<AutoSwapConfig>(`/api/projects/${universeId}/auto-swap`)
+}
+
+export function getCronStatus(): Promise<CronStatus> {
+  return request<CronStatus>('/api/cron-status')
+}
+
+export async function getCapabilities(project: Project): Promise<Capabilities> {
+  const id = project.universeId
+
+  const [
+    [settings, settingsProblem],
+    [thumbnails, thumbnailsProblem],
+    [discord, discordProblem],
+    [autoSwap, autoSwapProblem],
+    [cron],
+    [tickets, channelProblem],
+  ] = await Promise.all([
+    // Owner-only on the site, so a shared project reports a refusal here and
+    // the rest of the picture still comes back.
+    probe(() => getSettings(id)),
+    // 24h keeps the probe cheap; the question is whether numbers arrive at all.
+    probe(() => getThumbnails(id, '24h')),
+    probe(() => getNotifyContext(id)),
+    probe(() => getAutoSwap(id)),
+    probe(() => getCronStatus()),
+    probe(() => request<{ channel: TicketChannel | null }>(`/api/projects/${id}/tickets`)),
+  ])
+
+  return {
+    project,
+    settings,
+    settingsProblem,
+    thumbnails,
+    thumbnailsProblem,
+    discord,
+    discordProblem,
+    autoSwap,
+    autoSwapProblem,
+    cron,
+    channel: tickets?.channel ?? null,
+    channelProblem,
+  }
+}
+
+export function setProjectCredentials(
+  universeId: string,
+  body: { openCloudKey?: string | null; robloSecurity?: string | null }
+): Promise<{
+  hasKey?: boolean
+  hint?: string | null
+  usingDefault?: boolean
+  account?: { name: string | null; canEdit: boolean }
+}> {
+  return request(`/api/projects/${universeId}/settings`, {
+    method: 'PATCH',
+    body: JSON.stringify(body),
+  })
+}
+
+// ── The live set ────────────────────────────────────────────────────────────
+
+/**
+ * Replace which thumbnails are live.
+ *
+ * Roblox takes homepage thumbnail ids, not the asset ids the reports lead with,
+ * and it takes the whole set rather than a diff — anything left out goes
+ * inactive. Both are easy to get wrong from the outside, so the tool layer
+ * resolves ids and states the resulting set before sending it.
+ */
+export function setActiveThumbnails(
+  universeId: string,
+  thumbnailIds: string[]
+): Promise<{ ok: boolean }> {
+  return request('/api/set-active-thumbnails', {
+    method: 'POST',
+    body: JSON.stringify({ universeId, thumbnailIds }),
+  })
+}
+
+/** Remove a variant from the game for good. Roblox has no undo for this. */
+export function deleteThumbnail(universeId: string, thumbnailId: string): Promise<{ ok: boolean }> {
+  return request(
+    `/api/delete-thumbnail?universeId=${encodeURIComponent(universeId)}` +
+      `&thumbnailId=${encodeURIComponent(thumbnailId)}`,
+    { method: 'DELETE' }
+  )
+}
+
+// ── Generation ──────────────────────────────────────────────────────────────
+
+export interface GenerateResult {
+  imageBase64: string
+  mimeType: string
+  text?: string
+  enhancedPrompt: string
+  imageUrl: string | null
+  generationId: string | null
+  saved: boolean
+}
+
+export function generate(payload: {
+  prompt: string
+  imageUrls: string[]
+  primaryIndex?: number
+  universeId?: string
+  gameName?: string
+  gameDescription?: string
+  enhanceWithAI?: boolean
+  includeGameContext?: boolean
+  imageModel?: 'gemini' | 'openai'
+  profile?: string
+}): Promise<GenerateResult> {
+  return request<GenerateResult>('/api/generate', {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  })
+}
+
+export interface Generation {
+  id: string
+  date: string
+  prompt: string
+  enhancedPrompt: string
+  referenceUrls: string[]
+  imageUrl: string
+}
+
+export function getGenerations(universeId: string): Promise<{
+  universeId: string
+  gameName: string
+  generations: Generation[]
+}> {
+  return request(`/api/projects/${universeId}`)
+}
+
+/** Publish an image already stored on the site, without downloading it first. */
+export function uploadStoredGeneration(
+  universeId: string,
+  generationId: string
+): Promise<ExportResult> {
+  return request<ExportResult>('/api/export-to-roblox', {
+    method: 'POST',
+    body: JSON.stringify({ universeId, generationId }),
+  })
+}
+
+/** The style profiles the prompt enhancer can be pointed at. */
+export function listProfiles(): Promise<{ profiles: { id: string; name: string; content: string }[] }> {
+  return request('/api/profiles')
+}
+
+// ── Auto-swap ───────────────────────────────────────────────────────────────
+
+export function configureAutoSwap(
+  universeId: string,
+  body: Partial<{
+    autoSwapEnabled: boolean
+    dropCount: number
+    swapFrequencyMinutes: number
+    qptrThreshold: number
+    instantDropMinImpressions: number
+  }>
+): Promise<AutoSwapConfig> {
+  return request(`/api/projects/${universeId}/auto-swap`, {
+    method: 'PATCH',
+    body: JSON.stringify(body),
+  })
+}
+
+export interface SwapRunResult {
+  ok: boolean
+  reason: string
+  noop: boolean
+  skipped: boolean
+  note?: string
+  logId?: string
+  decision?: {
+    dropped: { assetId: string; qptr: number | null }[]
+    added: { assetId: string }[]
+    kept: { assetId: string }[]
+    newActiveHomepageIds: string[]
+    autoDisableReason: string | null
+    noop: boolean
+    noopReason: string | null
+  }
+}
+
+export function runAutoSwap(universeId: string): Promise<SwapRunResult> {
+  return request(`/api/projects/${universeId}/auto-swap/run`, { method: 'POST' })
+}
+
+export interface SwapLog {
+  id: string
+  firedAt: string
+  reason: string
+  skipped: boolean
+  note: string | null
+  snapshots: { assetId: string; action: string; qptr: number | null; impressions: number | null }[]
+}
+
+export function getAutoSwapLogs(universeId: string, limit = 25): Promise<{ logs: SwapLog[] }> {
+  return request(`/api/projects/${universeId}/auto-swap/logs?limit=${limit}`)
+}
+
+// ── Queue ───────────────────────────────────────────────────────────────────
+
+export interface QueueEntry {
+  id: string
+  universeId: string
+  assetId: string
+  imageUrl: string
+  position: number
+}
+
+export function getQueue(universeId: string): Promise<QueueEntry[]> {
+  return request(`/api/queue?universeId=${encodeURIComponent(universeId)}`)
+}
+
+export function addToQueue(payload: {
+  universeId: string
+  assetId: string
+  imageUrl: string
+}): Promise<QueueEntry> {
+  return request('/api/queue', { method: 'POST', body: JSON.stringify(payload) })
+}
+
+export function removeFromQueue(id: string): Promise<{ ok: boolean }> {
+  return request(`/api/queue/${id}`, { method: 'DELETE' })
+}
+
+export function reorderQueue(order: { id: string; position: number }[]): Promise<unknown> {
+  return request('/api/queue/reorder', { method: 'PUT', body: JSON.stringify({ order }) })
+}
+
+// ── Roblox lookup ───────────────────────────────────────────────────────────
+
+export interface GameInfo {
+  universeId: string
+  placeId?: string
+  name: string
+  description?: string
+  playing?: number
+  visits?: number
+  favorites?: number
+  likes?: number
+  dislikes?: number
+  thumbnailUrl?: string
+  creator?: { name?: string; type?: string }
+  accessMode?: 'view' | 'write'
+  writableSeedIndex?: number | null
+}
+
+export function getGameInfo(opts: { placeId?: string; universeId?: string }): Promise<GameInfo> {
+  const params = new URLSearchParams()
+  if (opts.universeId) params.set('universeId', opts.universeId)
+  else if (opts.placeId) params.set('placeId', opts.placeId)
+  return request<GameInfo>(`/api/game-info?${params}`)
+}
+
+/** Pull the id out of whatever shape the game was pasted in. */
+export function parseGameRef(input: string): { placeId?: string; universeId?: string } {
+  const trimmed = input.trim()
+  const link = trimmed.match(/roblox\.com\/(?:games|experiences)\/(\d+)/i)
+  if (link) return { placeId: link[1] }
+  if (/^\d+$/.test(trimmed)) return { placeId: trimmed }
+  throw new WhtError(
+    `"${input}" is not a Roblox game link or id. Paste the URL from the game page, or give the place id.`
+  )
+}
+
+export function addProject(payload: {
+  universeId: string
+  gameName: string
+  seedIndex?: number
+}): Promise<{ ok: boolean }> {
+  return request('/api/projects', { method: 'POST', body: JSON.stringify(payload) })
+}
+
+export interface SearchHit {
+  universeId: string
+  name: string
+  playing?: number
+  totalUpVotes?: number
+  totalDownVotes?: number
+  thumbnailUrl?: string
+}
+
+export function searchRobloxGames(
+  query: string,
+  opts: { seed?: number; pageToken?: string } = {}
+): Promise<{ games: SearchHit[]; nextPageToken: string | null }> {
+  const params = new URLSearchParams({ q: query, seed: String(opts.seed ?? 0) })
+  if (opts.pageToken) params.set('pageToken', opts.pageToken)
+  return request(`/api/search-games?${params}`)
+}
+
+// ── Trends ──────────────────────────────────────────────────────────────────
+
+export function getQptrSeries(
+  universeId: string,
+  range: '7d' | '14d' | '30d' = '14d'
+): Promise<{
+  series: { date: string; qptr: number | null; impressions: number | null }[]
+  liveDays: number
+}> {
+  return request(
+    `/api/project-qptr-series?universeId=${encodeURIComponent(universeId)}&range=${range}`
+  )
+}
+
+export function getMomentum(
+  universeId: string,
+  assetIds: string[],
+  range: '24h' | '3d' | '7d' | '30d' = '7d'
+): Promise<{
+  momentum: Record<string, { delta: number; pct: number; direction: 'up' | 'down' | 'flat' } | null>
+}> {
+  const params = new URLSearchParams({ universeId, assetIds: assetIds.join(','), range })
+  return request(`/api/thumbnail-series-momentum?${params}`)
+}
+
+// ── Reports ─────────────────────────────────────────────────────────────────
+
+/**
+ * The thumbnail overview as a PDF.
+ *
+ * Rows are posted rather than re-derived on the server so the document matches
+ * the figures the caller was just looking at, instead of a second query that
+ * quietly disagrees with them.
+ */
+export function buildThumbnailPdf(
+  universeId: string,
+  rangeLabel: string,
+  items: {
+    assetId: string
+    imageUrl: string
+    isActive: boolean
+    qptr: number | null
+    impressions: number | null
+    qualifiedPlays: number | null
+  }[]
+): Promise<Buffer> {
+  return requestBinary(`/api/projects/${universeId}/thumbnail-pdf`, {
+    method: 'POST',
+    body: JSON.stringify({ rangeLabel, items }),
+  })
+}
+
+// ── Tickets and sharing ─────────────────────────────────────────────────────
+
+export function listTickets(universeId: string): Promise<{
+  tickets: NotificationRecord[]
+  channel: TicketChannel | null
+}> {
+  return request(`/api/projects/${universeId}/tickets`)
+}
+
+export function listShares(universeId: string): Promise<{
+  shares: { id: string; userId: string; createdAt: string }[]
+}> {
+  return request(`/api/projects/${universeId}/shares`)
+}
+
+export function listInvites(universeId: string): Promise<{
+  invites: { id: string; token: string; createdAt: string; expiresAt: string }[]
+}> {
+  return request(`/api/projects/${universeId}/invites`)
+}
+
+export function createInvite(universeId: string): Promise<{
+  invite: { id: string; token: string; createdAt: string; expiresAt: string }
+}> {
+  return request(`/api/projects/${universeId}/invites`, { method: 'POST' })
+}
